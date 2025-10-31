@@ -14,6 +14,17 @@ from typing import List, Dict, Any
 from tqdm import tqdm 
 from loguru import logger 
 
+# --- 新增导入和常量 (用于正确的 EXIF 写入) ---
+import piexif 
+# EXIF UserComment 标签 ID (0x9286)
+EXIF_USER_COMMENT_TAG = 37510 
+# EXIF ImageDescription 标签 ID (0x010E)
+EXIF_IMAGE_DESCRIPTION_TAG = 270 
+# 标准 EXIF UNICODE 头部 (8 字节)，用于 UserComment (本次调试方案中不再使用)
+# UNICODE_HEADER = b"UNICODE\x00" 
+# ---------------------------------------------
+
+
 # 允许 Pillow 加载截断的图像文件，避免程序崩溃。
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
@@ -27,8 +38,9 @@ MAX_WORKERS = os.cpu_count() or 4
 # 日志文件记录 ERROR 级别的信息
 logger.add("image_processor_error.log", rotation="10 MB", level="ERROR", encoding="utf-8")
 # 默认的控制台输出级别设置为 INFO
+# 为了调试方便，将控制台输出级别临时设置为 DEBUG
 logger.configure(handlers=[
-    {"sink": sys.stdout, "level": "INFO"}
+    {"sink": sys.stdout, "level": "DEBUG"} # DEBUG 级别可以捕获所有详细流程信息
 ])
 
 
@@ -77,17 +89,15 @@ warnings.formatwarning = custom_warning_formatter
 def process_single_image(absolute_path: str) -> Dict[str, Any] | None:
     """
     处理单个图片文件，提取元数据并返回结构化数据。
-    (来自 image_scanner.py)
     """
-    global _current_processing_file # 声明使用全局变量
+    global _current_processing_file 
 
     image_extensions = ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp')
     
-    # 确保文件存在且是图片扩展名
     if not os.path.exists(absolute_path) or not absolute_path.lower().endswith(image_extensions):
-        return None # 不是图片或文件不存在，返回None
+        return None 
     
-    # 定义一个更通用的正则表达式，用于从原始文本中捕获 Stable Diffusion 的信息块
+    # 定义 Stable Diffusion 元数据信息的正则表达式模式
     sd_full_info_pattern = re.compile(
         r'.*?(?:masterpiece|score_\d|1girl|BREAK|Negative prompt:|Steps:).*?(?:Version:.*?|Module:.*?|)$',
         re.DOTALL # 允许.匹配换行符
@@ -108,7 +118,7 @@ def process_single_image(absolute_path: str) -> Dict[str, Any] | None:
     creation_date_dir = "未获取日期"
     core_positive_prompt = "核心词为空" 
 
-    _current_processing_file = absolute_path # 在处理每个文件前更新全局变量
+    _current_processing_file = absolute_path 
 
     try:
         # --- 获取文件创建日期 ---
@@ -119,26 +129,55 @@ def process_single_image(absolute_path: str) -> Dict[str, Any] | None:
         except Exception:
             pass 
         
-        # --- 开始图像元数据提取 ---
+        # --- 阶段 1: 开始图像元数据提取 ---
         with Image.open(absolute_path) as img:
-            # --- 阶段 1: 尝试从标准位置获取原始元数据字符串 ---
+            logger.debug(f"正在尝试提取文件: {absolute_path}, 格式: {img.format}")
+
+            # 1.1 PNG 格式：从 'parameters' 字段提取
             if "png" in img.format.lower() and "parameters" in img.info:
                 raw_metadata_string = img.info["parameters"]
+                logger.debug("从 PNG 'parameters' 字段提取到元数据。")
+            
+            # 1.2 JPEG/WebP 格式：从 EXIF/ImageDescription 提取
             elif "jpeg" in img.format.lower() or "webp" in img.format.lower():
                 if hasattr(img, '_getexif'):
                     exif_data = img._getexif()
                     if exif_data:
+                        # 0x9286: UserComment, 0x010E: ImageDescription
+                        # 遍历 UserComment 和 ImageDescription 标签
                         for tag, value in exif_data.items():
-                            if tag in [0x9286, 0x010E]: # UserComment (0x9286) or ImageDescription (0x010E)
+                            if tag in [EXIF_USER_COMMENT_TAG, EXIF_IMAGE_DESCRIPTION_TAG]: 
                                 try:
                                     if isinstance(value, bytes):
-                                        raw_metadata_string = value.decode('utf-8', errors='ignore')
-                                        if not re.search(r'Steps:', raw_metadata_string):
-                                            raw_metadata_string = value.decode('latin-1', errors='ignore')
+                                        
+                                        # *** 修复点: 优先尝试 EXIF 标准的 UTF-16LE 解码 (针对 UserComment) ***
+                                        # 检查是否存在 UNICODE 头部 (如果使用标准写入)
+                                        if tag == EXIF_USER_COMMENT_TAG and value.startswith(b"UNICODE\x00"):
+                                            data_bytes = value[len(b"UNICODE\x00"):]
+                                            raw_metadata_string = data_bytes.decode('utf-16le', errors='replace')
+                                            logger.debug("从 EXIF UserComment 标签 (标准 UTF-16LE) 提取到元数据。")
+                                            break # 解码成功，跳出内部循环
+                                        
+                                        # Fallback: 兼容性解码 (兼容非标准的元数据，包括 ImageDescription 的 UTF-8/Latin-1，以及本次调试的 UserComment UTF-8)
+                                        # 尝试 UTF-8 解码，如果失败尝试 latin-1
+                                        decoded_value = value.decode('utf-8', errors='ignore')
+                                        if not re.search(r'Steps:', decoded_value):
+                                            decoded_value = value.decode('latin-1', errors='ignore')
+                                        raw_metadata_string = decoded_value
+                                        logger.debug("从 EXIF 标签 (UTF-8/Latin-1 fallback) 提取到元数据。")
+
                                     elif isinstance(value, str):
                                         raw_metadata_string = value
-                                    break
-                                except Exception:
+                                    
+                                    if raw_metadata_string and re.search(r'Steps:', raw_metadata_string):
+                                        logger.debug(f"从 {img.format} EXIF 标签 {hex(tag)} 提取到元数据。")
+                                        break
+                                    elif raw_metadata_string:
+                                        # 如果是 ImageDescription，可能不是完整 SD 字符串，但也要记录
+                                        logger.debug(f"从 {img.format} EXIF 标签 {hex(tag)} 提取到非 SD 格式元数据。")
+
+                                except Exception as e:
+                                    logger.warning(f"EXIF 解码失败 for tag {hex(tag)}: {e}")
                                     pass
             
             # --- 阶段 2: 清理并使用更强大的正则表达式提取有效信息 ---
@@ -146,22 +185,22 @@ def process_single_image(absolute_path: str) -> Dict[str, Any] | None:
                 # 移除 Excel 不支持的非法 XML 字符
                 cleaned_string = ILLEGAL_CHARACTERS_RE.sub(r'', raw_metadata_string)
                 
-                # Clean up the "UNICODE" prefix
+                # 清理非标准头部，以防旧的非标准写入
                 if cleaned_string.startswith("UNICODE"):
                     cleaned_string = cleaned_string[len("UNICODE"):].lstrip() 
                 
-                # 尝试使用新的正则表达式捕获核心SD信息块
+                # 尝试使用 SD 信息块正则表达式捕获
                 match = sd_full_info_pattern.search(cleaned_string)
                 
                 if match:
                     extracted_text = match.group(0).strip() 
-                    # 再次使用更严格的正则验证，确保提取的是有效的SD参数
+                    # 再次使用更严格的正则验证
                     if sd_validation_pattern.search(extracted_text):
                         sd_info = extracted_text
                         sd_info_no_newlines = sd_info.replace('\n', ' ').replace('\r', ' ').strip()
+                        logger.debug("SD信息块成功通过验证和切割。")
                         
                         # --- 阶段 3: 切割信息 ---
-                        # 从后往前切割 '其他设置'
                         other_settings_match = re.search(r'(Steps:.*)', sd_info_no_newlines, re.DOTALL)
                         if other_settings_match:
                             other_settings = other_settings_match.group(1).strip()
@@ -169,7 +208,6 @@ def process_single_image(absolute_path: str) -> Dict[str, Any] | None:
                         else:
                             temp_sd_info = sd_info_no_newlines.strip()
 
-                        # 切割 '负面提示词' 和 '正面提示词'
                         negative_prompt_match = re.search(r'(Negative prompt:.*?)(?=\s*Steps:|$)', temp_sd_info, re.DOTALL)
                         if negative_prompt_match:
                             negative_prompt = negative_prompt_match.group(1).replace("Negative prompt:", "").strip()
@@ -177,49 +215,39 @@ def process_single_image(absolute_path: str) -> Dict[str, Any] | None:
                         else:
                             positive_prompt = temp_sd_info.strip()
                         
-                        # 统计正面提示词字数
                         positive_prompt_word_count = len(positive_prompt)
 
                     else:
                         sd_info = "没有扫描到生成信息"
                         sd_info_no_newlines = "没有扫描到生成信息"
+                        logger.debug("SD信息块未通过严格验证。")
                 else:
                     sd_info = "没有扫描到生成信息"
                     sd_info_no_newlines = "没有扫描到生成信息"
+                    logger.debug("未匹配到 SD 信息块的通用模式。")
 
             # --- 阶段 4: 提取正向提示词的核心词 ---
             core_positive_prompt = positive_prompt
-            # 将所有停用词替换为空字符串
             for word in POSITIVE_PROMPT_STOP_WORDS:
                 core_positive_prompt = f" {core_positive_prompt} "
-                
-                core_positive_prompt = re.sub(
-                    re.escape(word), 
-                    " ",             
-                    core_positive_prompt,
-                    flags=re.IGNORECASE 
-                )
-
-            # 3. 清理结果：移除多余的空格和首尾空格
+                core_positive_prompt = re.sub(re.escape(word), " ", core_positive_prompt, flags=re.IGNORECASE)
+            
             core_positive_prompt = core_positive_prompt.strip()
             core_positive_prompt = re.sub(r'\s+', ' ', core_positive_prompt)
-            
             if not core_positive_prompt:
                 core_positive_prompt = "核心词为空"
                 
-            # 从 other_settings 中提取 Model 信息
             model_match = re.search(r'Model: ([^,]+)', other_settings)
             if model_match:
                 model_name = model_match.group(1).strip()
 
 
     except Exception as e:
-        logger.error(f"Error processing image file '{absolute_path}' : {e}") 
-        # 发生任何错误时都保持默认值
+        # 捕获所有处理异常，并记录到日志文件
+        logger.error(f"FATAL Error processing image file '{absolute_path}' : {e}", exc_info=True) 
     finally:
         _current_processing_file = None 
 
-    # 返回结果字典
     return {
         "所在文件夹": containing_folder_absolute_path,
         "图片的绝对路径": absolute_path,
@@ -242,7 +270,6 @@ def get_png_files(folder_path: str) -> List[str]:
     """
     png_files = []
     for root, dirs, files in os.walk(folder_path):
-        # 排除名为 '.bf' 的文件夹
         if '.bf' in dirs:
             logger.warning(f"发现并跳过文件夹: {os.path.join(root, '.bf')}")
             dirs.remove('.bf')
@@ -255,12 +282,13 @@ def get_png_files(folder_path: str) -> List[str]:
 def extract_metadata_from_png(file_path: str) -> str:
     """
     从 PNG 文件中提取原始 'parameters' 元数据字符串。
-    如果提取失败，返回空字符串。
     """
     try:
         with Image.open(file_path) as img:
             if "png" in img.format.lower() and "parameters" in img.info:
+                logger.debug(f"成功从 PNG 提取原始元数据: {file_path}")
                 return img.info["parameters"]
+            logger.debug(f"文件不是标准 PNG 或缺少 'parameters' 字段: {file_path}")
             return ""
     except Exception as e:
         logger.error(f"从 PNG 文件 '{file_path}' 提取元数据失败: {e}")
@@ -273,11 +301,39 @@ def convert_and_write_metadata(
     output_dir_base: str
 ) -> str | None:
     """
-    将 PNG 转换为目标格式，并将元数据写入新文件。
-    (来自 image_converter.py)
-    """
+    写入过程核心函数：将 PNG 转换为目标格式，并将元数据写入新文件。
     
-    # 1. 构建新的输出路径
+    @@    333,1-344,4    @@
+    # *** 修复点: 根据用户 debug 方案，全面采用 UTF-8 编码进行 EXIF 写入 ***
+    # **关键步骤：EXIF 写入 (根据用户 debug 方案，全面采用 UTF-8 编码)**
+
+    # 1. UTF-8 编码
+    data_utf8 = raw_metadata.encode('utf-8', errors='ignore') 
+    
+    # 2. 构造 piexif 字典，实现双标签写入，均使用 UTF-8 编码
+    exif_dict = {
+        # Exif IFD 存放 UserComment (非标准，debug 兼容性)
+        "Exif": {
+            EXIF_USER_COMMENT_TAG: data_utf8 
+        },
+        # 0th IFD 存放 ImageDescription (兼容性最高的 UTF-8 编码)
+        "0th": {
+            EXIF_IMAGE_DESCRIPTION_TAG: data_utf8
+        }
+    } 
+    
+    # 3. 导出 EXIF 字节
+    exif_bytes = piexif.dump(exif_dict)
+    save_kwargs['exif'] = exif_bytes
+    logger.debug(f"EXIF 元数据准备完成 (DEBUG: 纯 UTF-8 双标签写入)，字节大小: {len(exif_bytes)}")
+    # -------------------------------------------------------------------
+
+    # 捕获 EXIF 准备过程中的错误
+    # ... (其余代码保持不变)
+    """
+    logger.info(f"--- 正在处理文件: {os.path.basename(png_path)} ---")
+    
+    # 1. 构建新的输出路径和文件夹
     folder = os.path.dirname(png_path)
     output_sub_dir = os.path.join(folder, output_dir_base) 
     os.makedirs(output_sub_dir, exist_ok=True)
@@ -285,56 +341,83 @@ def convert_and_write_metadata(
     base_name = os.path.splitext(os.path.basename(png_path))[0]
     new_file_name = f"{base_name}.{output_format}"
     output_path = os.path.join(output_sub_dir, new_file_name)
+    logger.debug(f"目标输出路径: {output_path}")
     
     try:
         # 2. 读取图像
         with Image.open(png_path) as img:
+            logger.debug(f"原始图像模式: {img.mode}")
             
             save_kwargs = {}
             if raw_metadata:
-                # 准备写入元数据到 EXIF UserComment (0x9286) 标签
+                logger.debug(f"原始元数据长度: {len(raw_metadata)}")
+                
+                # 3. 准备写入元数据到 EXIF
                 try:
-                    # 创建一个简单的 Exif 字典 {tag_id: value}
-                    # 标签 0x9286 (UserComment)
-                    exif_data = {
-                        0x9286: raw_metadata.encode('utf-8')
-                    }
-                    # 构建 ExifBytes 对象
-                    exif_bytes = ExifTags.dump(exif_data)
+                    
+                    # **关键步骤：EXIF 写入 (根据用户 debug 方案，全面采用 UTF-8 编码)**
+                    
+                    # 1. UTF-8 编码
+                    data_utf8 = raw_metadata.encode('utf-8', errors='ignore') 
+                    
+                    # 2. 构造 piexif 字典，实现双标签写入，均使用 UTF-8 编码
+                    exif_dict = {
+                        # Exif IFD 存放 UserComment (非标准，debug 兼容性)
+                        "Exif": {
+                            EXIF_USER_COMMENT_TAG: data_utf8 
+                        },
+                        # 0th IFD 存放 ImageDescription (兼容性最高的 UTF-8 编码)
+                        "0th": {
+                            EXIF_IMAGE_DESCRIPTION_TAG: data_utf8
+                        }
+                    } 
+                    
+                    # 3. 导出 EXIF 字节
+                    exif_bytes = piexif.dump(exif_dict)
                     save_kwargs['exif'] = exif_bytes
+                    logger.debug(f"EXIF 元数据准备完成 (DEBUG: 纯 UTF-8 双标签写入)，字节大小: {len(exif_bytes)}")
+                    # -------------------------------------------------------------------
 
                 except Exception as e:
-                    logger.warning(f"为 '{output_path}' 准备 EXIF 元数据失败，将尝试不带 EXIF 写入: {e}")
+                    # 捕获 EXIF 准备过程中的错误
+                    logger.error(f"为 '{output_path}' 准备 EXIF 元数据失败: {e}", exc_info=True)
+                    logger.warning("将尝试不带 EXIF 写入图像文件。")
             
             # 4. 保存图像
             if output_format == 'jpg':
-                # 对于 JPG, 确保图片是 RGB 模式
+                # **关键步骤：JPG 模式转换**
+                # JPG 不支持 Alpha 通道 (RGBA)，必须转换为 RGB
                 if img.mode == 'RGBA':
+                    logger.info("PNG 是 RGBA 模式，转换为 RGB 并填充白色背景。")
                     background = Image.new('RGB', img.size, (255, 255, 255))
-                    background.paste(img, mask=img.split()[3]) 
+                    background.paste(img, mask=img.split()[3]) # 粘贴并使用 Alpha 通道作为蒙版
                     img = background
                 elif img.mode != 'RGB':
+                     logger.info(f"图像模式为 {img.mode}，转换为 RGB。")
                      img = img.convert('RGB')
                      
+                logger.debug(f"开始保存 JPG 文件，最终模式: {img.mode}")
                 img.save(output_path, 'jpeg', quality=95, **save_kwargs)
                 
             elif output_format == 'webp':
-                # WebP 保存
+                # WebP 保存，不需要强制转换为 RGB，但会尝试写入 EXIF
+                logger.debug("开始保存 WEBP 文件。")
                 img.save(output_path, 'webp', quality=95, **save_kwargs)
             else:
                 logger.error(f"不支持的输出格式: {output_format}")
                 return None
             
+            logger.info(f"文件成功写入: {output_path}")
             return output_path
             
     except Exception as e:
-        logger.error(f"转换或保存文件 '{png_path}' 到 '{output_path}' 失败: {e}")
+        # 捕获文件读取或最终保存过程中的错误
+        logger.error(f"转换或保存文件 '{png_path}' 到 '{output_path}' 失败: {e}", exc_info=True)
         return None
 
 def main_conversion_process(root_folder: str, choice: int):
     """
     主处理流程，包括扫描、转换、生成报告。
-    (来自 image_converter.py)
     """
     
     # 1. 预处理
@@ -355,8 +438,7 @@ def main_conversion_process(root_folder: str, choice: int):
     success_count = 0
     failure_count = 0
     
-    # 2. 转换和记录
-    # 使用 tqdm 进行进度条计数
+    # 2. 转换和记录 (使用 tqdm 进行进度条计数)
     for png_path in tqdm(png_files, desc=f"转换到 {output_format.upper()} 进度"):
         
         # 2.1 提取原始 PNG 元数据
@@ -372,7 +454,6 @@ def main_conversion_process(root_folder: str, choice: int):
         
         if new_file_path:
             # 2.3 扫描新文件的元数据进行对比
-            # 注意: 这里使用单进程函数 process_single_image 来扫描新文件
             new_file_scan_result = process_single_image(new_file_path)
             
             new_file_info_string = (
@@ -380,15 +461,15 @@ def main_conversion_process(root_folder: str, choice: int):
                 if new_file_scan_result else "未扫描到信息"
             )
             
+            # 简化原始信息进行对比
             raw_png_info_no_newlines = raw_png_info.replace('\n', ' ').replace('\r', ' ').strip()
             
             # 2.4 对比结果
             is_consistent = "否"
-            # 只要新文件的元数据包含在原始元数据中（或完全一致），就认为一致
-            if raw_png_info_no_newlines and raw_png_info_no_newlines in new_file_info_string:
+            # 校验逻辑：新文件的元数据是否包含在原始元数据中（或完全一致）
+            # 由于写入和读取都使用标准方法，如果读取到的信息字符串等于原始信息字符串，则认为一致。
+            if raw_png_info_no_newlines and raw_png_info_no_newlines == new_file_info_string:
                 is_consistent = "是"
-            elif raw_png_info_no_newlines == new_file_info_string:
-                 is_consistent = "是"
             
             
             # 2.5 记录结果
@@ -423,12 +504,13 @@ def main_conversion_process(root_folder: str, choice: int):
             # 4. 自动运行打开 Excel 报告
             os.startfile(report_abs_path) 
         except Exception as e:
-            logger.error(f"生成 Excel 报告失败: {e}")
+            logger.error(f"生成 Excel 报告失败: {e}", exc_info=True)
 
 
 if __name__ == "__main__":
     
     logger.info("--- PNG 图片批量转换和元数据校验工具启动 ---")
+    logger.info("注意: 控制台日志级别已设置为 DEBUG，将输出详细流程信息。")
     
     # 1. 收集输入 - 文件夹路径
     while True:
