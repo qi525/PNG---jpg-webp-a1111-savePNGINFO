@@ -137,6 +137,9 @@ def process_single_image(absolute_path: str) -> Dict[str, Any] | None:
             # 1.1 PNG 格式：从 'parameters' 字段提取
             if "png" in img.format.lower() and "parameters" in img.info:
                 raw_metadata_string = img.info["parameters"]
+                # 增强清理：移除首尾空白字符
+                if raw_metadata_string:
+                    raw_metadata_string = raw_metadata_string.strip()
                 logger.debug("从 PNG 'parameters' 字段提取到元数据。")
             
             # 1.2 JPEG/WebP 格式：从 EXIF/ImageDescription 提取
@@ -158,6 +161,9 @@ def process_single_image(absolute_path: str) -> Dict[str, Any] | None:
                                                 # piexif.helper.UserComment.load 会自动处理 UNICODE\x00 头部并解码 UTF-16LE
                                                 decoded_value = piexif.helper.UserComment.load(value)
                                                 raw_metadata_string = decoded_value
+                                                # 增强清理：移除首尾空白字符
+                                                if raw_metadata_string:
+                                                    raw_metadata_string = raw_metadata_string.strip()
                                                 logger.debug("从 EXIF UserComment 标签 (piexif.helper 标准解码) 提取到元数据。")
                                                 break # 解码成功，跳出内部循环
                                             except Exception:
@@ -170,6 +176,9 @@ def process_single_image(absolute_path: str) -> Dict[str, Any] | None:
                                         if not re.search(r'Steps:', decoded_value):
                                             decoded_value = value.decode('latin-1', errors='ignore')
                                         raw_metadata_string = decoded_value
+                                        # 增强清理：移除首尾空白字符
+                                        if raw_metadata_string:
+                                            raw_metadata_string = raw_metadata_string.strip()
                                         logger.debug("从 EXIF 标签 (UTF-8/Latin-1 fallback) 提取到元数据。")
 
                                     elif isinstance(value, str):
@@ -193,6 +202,7 @@ def process_single_image(absolute_path: str) -> Dict[str, Any] | None:
                 
                 # 清理非标准头部，以防旧的非标准写入
                 if cleaned_string.startswith("UNICODE"):
+                    # 此时 raw_metadata_string 已经被 strip() 过，但为了保险，这里使用 lstrip() 清理内部头部
                     cleaned_string = cleaned_string[len("UNICODE"):].lstrip() 
                 
                 # 尝试使用 SD 信息块正则表达式捕获
@@ -300,7 +310,6 @@ def extract_metadata_from_png(file_path: str) -> str:
         logger.error(f"从 PNG 文件 '{file_path}' 提取元数据失败: {e}")
         return ""
 
-# @@ 230,230 +230,250 @@
 # 新增：用户保留的纯 UTF-8 兼容性写入方案
 def get_exif_bytes_utf8_compatibility(raw_metadata: str) -> bytes | None:
     """
@@ -328,7 +337,6 @@ def get_exif_bytes_utf8_compatibility(raw_metadata: str) -> bytes | None:
         logger.error(f"[UTF-8 兼容性方案] 生成 EXIF 字节失败: {e}")
         return None
 
-# @@ 251,254 +251,254 @@
 # 重构：使用 piexif.helper.UserComment.dump 简化标准 UserComment 的生成
 def generate_exif_bytes(raw_metadata: str) -> bytes | None:
     """
@@ -472,6 +480,11 @@ def main_conversion_process(root_folder: str, choice: int):
         # 2.1 提取原始 PNG 元数据
         raw_png_info = extract_metadata_from_png(png_path)
         
+        # --- 优化点: 清理元数据，移除首尾空格和换行符，避免写入多余字符 ---
+        # 这一步保留，用于确保写入的新文件是干净的
+        if raw_png_info:
+            raw_png_info = raw_png_info.strip()
+
         # 2.2 执行转换和写入元数据
         new_file_path = convert_and_write_metadata(
             png_path, 
