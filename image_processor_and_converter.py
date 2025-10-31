@@ -6,7 +6,7 @@ import re
 import sys
 import warnings 
 import pandas as pd
-import concurrent.futures 
+import concurrent.futures # 导入 concurrent.futures 模块，用于实现线程池/进程池
 from PIL import Image, ImageFile, ExifTags
 from datetime import datetime
 from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE # 导入用于清理非法字符的正则
@@ -451,86 +451,135 @@ def convert_and_write_metadata(
         logger.error(f"转换或保存文件 '{png_path}' 到 '{output_path}' 失败: {e}", exc_info=True)
         return None
 
+def process_conversion_task(png_path: str, output_format: str, output_dir_base: str) -> Dict[str, Any]:
+    """
+    [多线程工作单元] 处理单个 PNG 文件的提取、转换、写入和校验。
+    """
+    # 1. 提取原始 PNG 元数据
+    raw_png_info = extract_metadata_from_png(png_path)
+    
+    # 清理元数据，移除首尾空格和换行符，确保元数据写入时是干净的
+    if raw_png_info: # 检查是否成功提取到元数据
+        raw_png_info = raw_png_info.strip() # 使用 strip() 清理字符串首尾的空白字符
+        
+    # 2. 执行转换和写入元数据
+    new_file_path = convert_and_write_metadata( # 调用核心转换函数
+        png_path, 
+        raw_png_info, 
+        output_format, 
+        output_dir_base
+    )
+    
+    # 3. 结果收集逻辑
+    if new_file_path: # 检查文件是否成功生成
+        # 扫描新文件的元数据进行对比
+        new_file_scan_result = process_single_image(new_file_path) # 再次扫描新生成的文件进行元数据提取和结构化
+        
+        new_file_info_string = ( # 获取新文件的元数据字符串
+            new_file_scan_result.get("去掉换行符的生成信息", "") 
+            if new_file_scan_result else "未扫描到信息"
+        )
+        
+        # 简化原始信息进行对比
+        raw_png_info_no_newlines = raw_png_info.replace('\n', ' ').replace('\r', ' ').strip() # 清理原始元数据字符串
+        
+        # 对比结果
+        is_consistent = "否" # 默认标记为不一致
+        # 校验逻辑：新文件的元数据是否与原始元数据字符串一致
+        if raw_png_info_no_newlines and raw_png_info_no_newlines == new_file_info_string:
+            is_consistent = "是" # 如果一致，标记为“是”
+        
+        # 记录成功结果
+        return { # 返回成功任务的结果字典
+            "原文件的绝对路径": png_path,
+            "原文件的pnginfo信息": raw_png_info_no_newlines,
+            f"生成的{output_format.upper()}文件的绝对路径": new_file_path,
+            f"生成的{output_format.upper()}文件的pnginfo信息": new_file_info_string,
+            "原文件和生成文件的pnginfo信息是否一致": is_consistent,
+            "success": True # 标记任务成功
+        }
+    else:
+        # 记录失败结果
+        # 由于 convert_and_write_metadata 失败时会返回 None，此处进行失败记录
+        return { # 返回失败任务的结果字典
+            "原文件的绝对路径": png_path,
+            "原文件的pnginfo信息": raw_png_info.replace('\n', ' ').replace('\r', ' ').strip(),
+            f"生成的{output_format.upper()}文件的绝对路径": "转换失败",
+            f"生成的{output_format.upper()}文件的pnginfo信息": "转换失败",
+            "原文件和生成文件的pnginfo信息是否一致": "否 (转换失败)",
+            "success": False # 标记任务失败
+        }
+
+
 def main_conversion_process(root_folder: str, choice: int):
     """
-    主处理流程，包括扫描、转换、生成报告。
+    主处理流程，包括扫描、转换、生成报告。使用多线程并发处理文件。
     """
     
     # 1. 预处理
-    output_format = 'jpg' if choice == 1 else 'webp'
-    output_dir_base = f"png转{output_format.upper()}"
-    report_file = f"png_conversion_report_{output_format}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    output_format = 'jpg' if choice == 1 else 'webp' # 根据用户选择确定输出格式
+    output_dir_base = f"png转{output_format.upper()}" # 定义输出子目录名称
+    report_file = f"png_conversion_report_{output_format}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx" # 定义报告文件名称
     
-    png_files = get_png_files(root_folder)
-    total_files = len(png_files)
+    png_files = get_png_files(root_folder) # 扫描文件夹，获取所有 PNG 文件路径
+    total_files = len(png_files) # 任务总数
     
-    if not total_files:
-        logger.info(f"在 '{root_folder}' 中未找到任何 PNG 文件。")
-        return
+    if not total_files: # 如果没有找到文件
+        logger.info(f"在 '{root_folder}' 中未找到任何 PNG 文件。") # 打印日志
+        return # 退出函数
     
-    logger.info(f"在 '{root_folder}' 中发现 {total_files} 个 PNG 文件。将转换为 {output_format.upper()}。")
+    logger.info(f"在 '{root_folder}' 中发现 {total_files} 个 PNG 文件。将转换为 {output_format.upper()}。") # 打印任务信息
     
-    conversion_results = []
-    success_count = 0
-    failure_count = 0
+    conversion_results = [] # 初始化结果列表
+    futures_to_path = {} # 初始化字典，用于存储 Future 对象和对应的文件路径
+    success_count = 0 # 初始化成功计数器
+    failure_count = 0 # 初始化失败计数器
     
-    # 2. 转换和记录 (使用 tqdm 进行进度条计数)
-    for png_path in tqdm(png_files, desc=f"转换到 {output_format.upper()} 进度"):
+    logger.info("--- 开始多线程文件转换处理 ---") # 打印多线程启动日志
+    
+    # 2. 转换和记录 (使用多线程)
+    # 使用 ThreadPoolExecutor 实现多线程并发，适合 I/O 密集型任务（文件读写）
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor: # 实例化线程池执行器，并设置最大工作线程数
         
-        # 2.1 提取原始 PNG 元数据
-        raw_png_info = extract_metadata_from_png(png_path)
+        # 遍历所有 PNG 文件，并将任务提交给线程池
+        for png_path in png_files: # 遍历待处理的 PNG 文件列表
+            # 提交任务到线程池，执行 process_conversion_task 函数
+            future = executor.submit(process_conversion_task, png_path, output_format, output_dir_base) # 提交 worker 函数到线程池，传递必要的参数
+            # 存储 Future 对象和对应的原始文件路径
+            futures_to_path[future] = png_path # 将返回的 Future 对象作为键，文件路径作为值存入字典
         
-        # --- 优化点: 清理元数据，移除首尾空格和换行符，避免写入多余字符 ---
-        # 这一步保留，用于确保写入的新文件是干净的
-        if raw_png_info:
-            raw_png_info = raw_png_info.strip()
-
-        # 2.2 执行转换和写入元数据
-        new_file_path = convert_and_write_metadata(
-            png_path, 
-            raw_png_info, 
-            output_format, 
-            output_dir_base
+        # 使用 concurrent.futures.as_completed 迭代已完成的 Future
+        # 并结合 tqdm 来显示进度条
+        progress_bar = tqdm( # 创建进度条
+            concurrent.futures.as_completed(futures_to_path), # 迭代已完成的任务 Future
+            total=total_files, # 设置进度条的总步数为文件总数
+            desc=f"转换到 {output_format.upper()} 进度" # 进度条的描述文本
         )
         
-        if new_file_path:
-            # 2.3 扫描新文件的元数据进行对比
-            new_file_scan_result = process_single_image(new_file_path)
-            
-            new_file_info_string = (
-                new_file_scan_result.get("去掉换行符的生成信息", "") 
-                if new_file_scan_result else "未扫描到信息"
-            )
-            
-            # 简化原始信息进行对比
-            raw_png_info_no_newlines = raw_png_info.replace('\n', ' ').replace('\r', ' ').strip()
-            
-            # 2.4 对比结果
-            is_consistent = "否"
-            # 校验逻辑：新文件的元数据是否包含在原始元数据中（或完全一致）
-            # 由于写入和读取都使用标准方法，如果读取到的信息字符串等于原始信息字符串，则认为一致。
-            if raw_png_info_no_newlines and raw_png_info_no_newlines == new_file_info_string:
-                is_consistent = "是"
-            
-            
-            # 2.5 记录结果
-            conversion_results.append({
-                "原文件的绝对路径": png_path,
-                "原文件的pnginfo信息": raw_png_info_no_newlines,
-                f"生成的{output_format.upper()}文件的绝对路径": new_file_path,
-                f"生成的{output_format.upper()}文件的pnginfo信息": new_file_info_string,
-                "原文件和生成文件的pnginfo信息是否一致": is_consistent,
-            })
-            success_count += 1
-        else:
-            failure_count += 1
-            conversion_results.append({
-                "原文件的绝对路径": png_path,
-                "原文件的pnginfo信息": raw_png_info.replace('\n', ' ').replace('\r', ' ').strip(),
-                f"生成的{output_format.upper()}文件的绝对路径": "转换失败",
-                f"生成的{output_format.upper()}文件的pnginfo信息": "转换失败",
-                "原文件和生成文件的pnginfo信息是否一致": "否 (转换失败)",
-            })
+        for future in progress_bar: # 遍历每一个已完成的 Future
+            png_path = futures_to_path[future] # 从字典中获取该 Future 对应的文件路径
+            try:
+                result = future.result() # 获取线程执行的结果（即 process_conversion_task 的返回值）
+                conversion_results.append(result) # 将结果字典添加到总列表中
+                
+                # 更新计数器
+                if result.get('success', False): # 根据结果字典中的 'success' 键判断任务是否成功
+                    success_count += 1 # 成功任务计数加一
+                else:
+                    failure_count += 1 # 失败任务计数加一
+                
+            except Exception as exc: # 捕获任务执行过程中发生的任何异常
+                logger.error(f"文件 '{png_path}' 转换任务异常终止: {exc}") # 记录异常错误日志
+                failure_count += 1 # 任务异常，失败任务计数加一
+                # 添加一个失败记录到结果列表
+                conversion_results.append({ # 添加失败任务的结果字典
+                    "原文件的绝对路径": png_path,
+                    "原文件的pnginfo信息": "任务异常",
+                    f"生成的{output_format.upper()}文件的绝对路径": "转换失败 (任务异常)",
+                    f"生成的{output_format.upper()}文件的pnginfo信息": "转换失败 (任务异常)",
+                    "原文件和生成文件的pnginfo信息是否一致": "否 (任务异常)",
+                    "success": False # 标记为失败
+                })
 
     # 3. 结果总结和 Excel 报告生成
     logger.info("\n--- 转换总结 ---")
