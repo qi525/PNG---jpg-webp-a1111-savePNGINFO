@@ -20,8 +20,8 @@ import piexif
 EXIF_USER_COMMENT_TAG = 37510 
 # EXIF ImageDescription 标签 ID (0x010E)
 EXIF_IMAGE_DESCRIPTION_TAG = 270 
-# 标准 EXIF UNICODE 头部 (8 字节)，用于 UserComment (本次调试方案中不再使用)
-# UNICODE_HEADER = b"UNICODE\x00" 
+# 标准 EXIF UNICODE 头部 (8 字节)，用于 UserComment
+UNICODE_HEADER = b"UNICODE\x00" 
 # ---------------------------------------------
 
 
@@ -152,8 +152,9 @@ def process_single_image(absolute_path: str) -> Dict[str, Any] | None:
                                         
                                         # *** 修复点: 优先尝试 EXIF 标准的 UTF-16LE 解码 (针对 UserComment) ***
                                         # 检查是否存在 UNICODE 头部 (如果使用标准写入)
-                                        if tag == EXIF_USER_COMMENT_TAG and value.startswith(b"UNICODE\x00"):
-                                            data_bytes = value[len(b"UNICODE\x00"):]
+                                        if tag == EXIF_USER_COMMENT_TAG and value.startswith(UNICODE_HEADER):
+                                            # 识别 UserComment 且有 UNICODE 头部 -> 使用 UTF-16LE 解码
+                                            data_bytes = value[len(UNICODE_HEADER):]
                                             raw_metadata_string = data_bytes.decode('utf-16le', errors='replace')
                                             logger.debug("从 EXIF UserComment 标签 (标准 UTF-16LE) 提取到元数据。")
                                             break # 解码成功，跳出内部循环
@@ -294,6 +295,61 @@ def extract_metadata_from_png(file_path: str) -> str:
         logger.error(f"从 PNG 文件 '{file_path}' 提取元数据失败: {e}")
         return ""
 
+def get_exif_bytes_utf8_compatibility(raw_metadata: str) -> bytes | None:
+    """
+    [保留方案] 纯 UTF-8 双标签写入 EXIF。
+    - UserComment: 写入纯 UTF-8 字节 (非标准，兼容部分外部软件)。
+    - ImageDescription: 写入纯 UTF-8 字节 (兼容性最高的标签)。
+    """
+    try:
+        data_utf8 = raw_metadata.encode('utf-8', errors='ignore') 
+        
+        exif_dict = {
+            # Exif IFD 存放 UserComment (非标准 UTF-8)
+            "Exif": {
+                EXIF_USER_COMMENT_TAG: data_utf8 
+            },
+            # 0th IFD 存放 ImageDescription (兼容性最高的 UTF-8 编码)
+            "0th": {
+                EXIF_IMAGE_DESCRIPTION_TAG: data_utf8
+            }
+        } 
+        return piexif.dump(exif_dict)
+    except Exception as e:
+        logger.error(f"[UTF-8 兼容性方案] 生成 EXIF 字节失败: {e}")
+        return None
+
+def get_exif_bytes_standard_and_utf8_fallback(raw_metadata: str) -> bytes | None:
+    """
+    [调试方案] EXIF 标准 UserComment (UTF-16LE) + ImageDescription (UTF-8) 混合写入。
+    - UserComment: 遵循 EXIF 标准 (UNICODE\x00 + UTF-16LE)。
+    - ImageDescription: 写入纯 UTF-8 字节 (通用兼容)。
+    """
+    try:
+        # 1. UserComment 标准编码：将字符串编码为 UTF-16LE 字节
+        data_utf16le = raw_metadata.encode('utf-16le', errors='ignore') 
+        # 2. 添加标准的 8 字节 UNICODE 头部
+        user_comment_bytes = UNICODE_HEADER + data_utf16le
+        
+        # 3. ImageDescription 兼容性编码
+        data_utf8 = raw_metadata.encode('utf-8', errors='ignore')
+        
+        # 4. 构造 piexif 字典
+        exif_dict = {
+            # Exif IFD 存放 UserComment (标准 UTF-16LE)
+            "Exif": {
+                EXIF_USER_COMMENT_TAG: user_comment_bytes 
+            },
+            # 0th IFD 存放 ImageDescription (兼容性 UTF-8 编码)
+            "0th": {
+                EXIF_IMAGE_DESCRIPTION_TAG: data_utf8
+            }
+        } 
+        return piexif.dump(exif_dict)
+    except Exception as e:
+        logger.error(f"[标准+兼容混合方案] 生成 EXIF 字节失败: {e}")
+        return None
+
 def convert_and_write_metadata(
     png_path: str, 
     raw_metadata: str, 
@@ -303,33 +359,7 @@ def convert_and_write_metadata(
     """
     写入过程核心函数：将 PNG 转换为目标格式，并将元数据写入新文件。
     
-    @@    333,1-344,4    @@
-    # *** 修复点: 根据用户 debug 方案，全面采用 UTF-8 编码进行 EXIF 写入 ***
-    # **关键步骤：EXIF 写入 (根据用户 debug 方案，全面采用 UTF-8 编码)**
-
-    # 1. UTF-8 编码
-    data_utf8 = raw_metadata.encode('utf-8', errors='ignore') 
-    
-    # 2. 构造 piexif 字典，实现双标签写入，均使用 UTF-8 编码
-    exif_dict = {
-        # Exif IFD 存放 UserComment (非标准，debug 兼容性)
-        "Exif": {
-            EXIF_USER_COMMENT_TAG: data_utf8 
-        },
-        # 0th IFD 存放 ImageDescription (兼容性最高的 UTF-8 编码)
-        "0th": {
-            EXIF_IMAGE_DESCRIPTION_TAG: data_utf8
-        }
-    } 
-    
-    # 3. 导出 EXIF 字节
-    exif_bytes = piexif.dump(exif_dict)
-    save_kwargs['exif'] = exif_bytes
-    logger.debug(f"EXIF 元数据准备完成 (DEBUG: 纯 UTF-8 双标签写入)，字节大小: {len(exif_bytes)}")
-    # -------------------------------------------------------------------
-
-    # 捕获 EXIF 准备过程中的错误
-    # ... (其余代码保持不变)
+    !!! 注意: 本次更新采用 [调试方案] get_exif_bytes_standard_and_utf8_fallback。
     """
     logger.info(f"--- 正在处理文件: {os.path.basename(png_path)} ---")
     
@@ -355,27 +385,12 @@ def convert_and_write_metadata(
                 # 3. 准备写入元数据到 EXIF
                 try:
                     
-                    # **关键步骤：EXIF 写入 (根据用户 debug 方案，全面采用 UTF-8 编码)**
-                    
-                    # 1. UTF-8 编码
-                    data_utf8 = raw_metadata.encode('utf-8', errors='ignore') 
-                    
-                    # 2. 构造 piexif 字典，实现双标签写入，均使用 UTF-8 编码
-                    exif_dict = {
-                        # Exif IFD 存放 UserComment (非标准，debug 兼容性)
-                        "Exif": {
-                            EXIF_USER_COMMENT_TAG: data_utf8 
-                        },
-                        # 0th IFD 存放 ImageDescription (兼容性最高的 UTF-8 编码)
-                        "0th": {
-                            EXIF_IMAGE_DESCRIPTION_TAG: data_utf8
-                        }
-                    } 
-                    
-                    # 3. 导出 EXIF 字节
-                    exif_bytes = piexif.dump(exif_dict)
-                    save_kwargs['exif'] = exif_bytes
-                    logger.debug(f"EXIF 元数据准备完成 (DEBUG: 纯 UTF-8 双标签写入)，字节大小: {len(exif_bytes)}")
+                    # **关键步骤：EXIF 写入 (调用调试方案)**
+                    exif_bytes = get_exif_bytes_standard_and_utf8_fallback(raw_metadata)
+
+                    if exif_bytes:
+                        save_kwargs['exif'] = exif_bytes
+                        logger.debug(f"EXIF 元数据准备完成 (调试方案: 标准 UserComment + UTF-8 ImageDescription)，字节大小: {len(exif_bytes)}")
                     # -------------------------------------------------------------------
 
                 except Exception as e:
