@@ -14,6 +14,8 @@ from typing import List, Dict, Any
 from tqdm import tqdm 
 from loguru import logger 
 
+# TODO 还是debug测试能不能生成webp
+
 # --- 新增导入和常量 (用于正确的 EXIF 写入) ---
 import piexif 
 import piexif.helper # 新增导入 piexif.helper 简化 UserComment 写入
