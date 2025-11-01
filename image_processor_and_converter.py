@@ -43,7 +43,7 @@ MAX_WORKERS = os.cpu_count() or 4
 # 日志文件记录 ERROR 级别的信息
 logger.add("image_processor_error.log", rotation="10 MB", level="ERROR", encoding="utf-8")
 # 默认的控制台输出级别设置为 INFO
-# **改动点 1: 降低控制台日志级别为 INFO，只输出关键信息，减少 DEBUG 信息的干扰。**
+# **改动点：将控制台输出级别设置为 INFO，只输出重要信息和进度条，以精简控制台输出。**
 logger.configure(handlers=[
     {"sink": sys.stdout, "level": "INFO"} # 级别调整为 INFO，只输出重要信息和进度条配合
 ])
@@ -582,6 +582,10 @@ def main_conversion_process(root_folder: str, choice: int, choice_dir: int):
     
     logger.info(f"在 '{root_folder}' 中发现 {total_files} 个 PNG 文件。将转换为 {output_format.upper()}。") # 打印任务信息
     
+    # **改动点 1: 提示当前使用的线程数量**
+    # 修复 Pylance 警告：由于此处只读取 MAX_WORKERS，无需使用 global 关键字。
+    logger.info(f"本次任务将使用 {MAX_WORKERS} 个线程进行并发处理 (基于当前计算机的 CPU 核心数)。")
+
     # --- 任务准备：预提取元数据 (避免在线程池内重复 I/O) ---
     tasks_data = []
     for png_path in png_files:
@@ -661,16 +665,14 @@ def main_conversion_process(root_folder: str, choice: int, choice_dir: int):
     # 3. 结果总结和 Excel 报告生成
     logger.info("\n--- 转换总结 ---")
     logger.info(f"总数量: {total_files}, 成功: {success_count}, 失败: {failure_count}")
-    # **改动点 2: 增加元数据一致性校验失败数量的统计和报告**
+
     if conversion_results:
         try:
             df = pd.DataFrame(conversion_results)
-            
             # **新增：元数据一致性校验统计**
-            # 统计 '原文件和生成文件的pnginfo信息是否一致' 字段中值为 '否' 的数量
             inconsistent_count = (df['原文件和生成文件的pnginfo信息是否一致'] == '否').sum()
             logger.info(f"元数据不一致 (校验失败) 数量: {inconsistent_count} (请查看 Excel 报告中 '否 (转换失败)' 和 '否 (任务异常)' 的记录)")
-            
+
             # 根据用户需求，日志和 Excel 报告都要自动运行打开
             report_abs_path = os.path.abspath(report_file)
             df.to_excel(report_file, index=False, engine='openpyxl')
@@ -686,7 +688,8 @@ if __name__ == "__main__":
     
     # ** 核心安全警告：本工具仅执行读取和写入操作，不包含任何删除原始文件的功能。**
     logger.info("--- PNG 图片批量转换和元数据校验工具启动 ---")
-    logger.info("注意: 控制台日志级别已设置为 INFO，将输出重要信息。详细 DEBUG 信息请通过代码修改。")
+    # 提示当前控制台级别已设置为 INFO
+    logger.info("注意: 控制台日志级别已设置为 INFO，将只输出重要流程信息。详细 DEBUG 信息请通过修改代码查看。")
     
     # 1. 收集输入 - 文件夹路径
     while True:
@@ -724,12 +727,24 @@ if __name__ == "__main__":
         except ValueError:
             print("输入无效，请输入数字 1 或 2。")
 
+    # **改动点 2: Windows Defender 性能警报 (仅 Windows)**
+    if sys.platform.startswith('win'):
+        # 确保使用全局 MAX_WORKERS
+        logger.warning("-" * 50)
+        logger.warning("【⚠️ 性能严重警告 ⚠️】")
+        logger.warning(f"当前程序使用 {MAX_WORKERS} 线程进行高强度文件 I/O，可能导致 CPU 占用率接近 100%。")
+        logger.warning("如果您运行在 Windows 系统，微软实时防护进程 MsMpEng.exe ('Antimalware Service Executable') 可能会扫描大量文件 I/O，极大地拖慢转换速度、抢占 CPU 资源，甚至造成系统卡死。")
+        logger.warning("强烈建议您在运行本程序前：")
+        logger.warning("  1. 暂时关闭 Windows Defender 实时保护。")
+        logger.warning("  2. 将本程序的工作目录 (输入文件夹和输出文件夹) 添加到 Windows Defender 的排除项中。")
+        logger.warning("-" * 50)
+        
     # 4. 执行主流程
     main_conversion_process(root_folder, choice, choice_dir)
     
     logger.info("--- 任务完成 ---")
     
-    # **改动点 3: 程序结束暂停，等待用户回车关闭窗口，以防止 EXE 运行时窗口立即关闭**
+    # **程序结束暂停，等待用户回车关闭窗口**
     try:
         input("程序已执行完毕，请按回车键关闭窗口...")
     except EOFError:
