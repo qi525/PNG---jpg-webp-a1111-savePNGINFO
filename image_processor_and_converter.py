@@ -14,7 +14,8 @@ from typing import List, Dict, Any
 from tqdm import tqdm 
 from loguru import logger 
 
-# TODO 还是debug测试能不能生成webp
+# TODO 还是debug测试能不能生成webp，测试应该算是比较成功。【已完成】
+# TODO 添加生成文件的模式，目标文件夹同级生成一个"PNG转JPG"或者"PNG转WEBP"的兄弟文件夹，然后把整个目标文件夹的目录结构全部复制过去，只是把png文件转换成jpg或者webp文件，其他文件不动。
 
 # --- 新增导入和常量 (用于正确的 EXIF 写入) ---
 import piexif 
