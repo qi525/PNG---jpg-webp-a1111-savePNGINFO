@@ -40,3 +40,4 @@ Playwright_Image_Capture/
 dist/
 build/
 SD_Image_Converter.spec
+image_processor_and_converter.spec
