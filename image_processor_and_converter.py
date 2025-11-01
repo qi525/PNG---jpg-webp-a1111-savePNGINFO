@@ -7,6 +7,7 @@ import sys
 import warnings 
 import pandas as pd
 import concurrent.futures # 导入 concurrent.futures 模块，用于实现线程池/进程池
+import shutil # 新增：导入 shutil 用于文件复制（失败恢复机制）
 from PIL import Image, ImageFile, ExifTags
 from datetime import datetime
 from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE # 导入用于清理非法字符的正则
@@ -314,6 +315,47 @@ def extract_metadata_from_png(file_path: str) -> str:
         logger.error(f"从 PNG 文件 '{file_path}' 提取元数据失败: {e}")
         return ""
 
+# 新增辅助函数：计算目标输出子目录
+def _get_output_sub_dir(
+    input_path: str, 
+    output_dir_base: str, 
+    root_folder: str, 
+    output_dir_type: int
+) -> str | None:
+    """
+    根据输入文件路径和模式，计算目标输出子目录的绝对路径。
+    """
+    # 确保路径是绝对路径
+    root_folder_abs = os.path.abspath(root_folder)
+    input_path_abs = os.path.abspath(input_path)
+    
+    if output_dir_type == 1:
+        # 模式 1: 目标文件夹同级，创建兄弟文件夹，并复刻目录结构
+        # -----------------------------------------------------------
+        parent_folder = os.path.dirname(root_folder)
+        sibling_dir_path = os.path.join(parent_folder, output_dir_base)
+        
+        root_folder_name = os.path.basename(root_folder_abs)
+        
+        # 获取相对目录 (例如: 子文件夹A/子文件夹B)
+        relative_dir = os.path.relpath(os.path.dirname(input_path_abs), root_folder_abs)
+        
+        # 构建新的输出子目录 (新逻辑: D:/PNG转JPG/转换目标/子文件夹A/子文件夹B)
+        output_sub_dir = os.path.join(sibling_dir_path, root_folder_name, relative_dir)
+        return output_sub_dir
+        # -----------------------------------------------------------
+        
+    elif output_dir_type == 2:
+        # 模式 2 (原有模式): 在当前文件所在的子文件夹内创建子目录
+        # -----------------------------------------------------------
+        folder = os.path.dirname(input_path)
+        output_sub_dir = os.path.join(folder, output_dir_base) 
+        return output_sub_dir
+        # -----------------------------------------------------------
+    else:
+        return None
+
+
 # 新增：用户保留的纯 UTF-8 兼容性写入方案
 def get_exif_bytes_utf8_compatibility(raw_metadata: str) -> bytes | None:
     """
@@ -372,7 +414,8 @@ def generate_exif_bytes(raw_metadata: str) -> bytes | None:
         } 
         return piexif.dump(exif_dict)
     except Exception as e:
-        logger.error(f"[标准+兼容混合优化方案] 生成 EXIF 字节失败: {e}")
+        # **改动：针对元数据过长导致的 piexif.dump 失败，记录更详细的警告**
+        logger.error(f"[标准+兼容混合优化方案] 生成 EXIF 字节失败: {e}. **警告：这通常是由于元数据信息过长 (如 SD 提示词过长) 导致的写入失败**")
         return None
 
 def convert_and_write_metadata(
@@ -388,50 +431,25 @@ def convert_and_write_metadata(
     
     !!! 安全提示: 本函数仅执行读取、转换和写入操作，不包含任何删除原文件的代码。
     """
-    # **改动点 1：将文件处理状态信息降级到 DEBUG 级别**
+    # 将文件处理状态信息降级到 DEBUG 级别
     logger.debug(f"--- 正在处理文件: {os.path.basename(png_path)} ---")
     
     # 1. 构建新的输出路径和文件夹
+    output_sub_dir = _get_output_sub_dir(
+        png_path, 
+        output_dir_base, 
+        root_folder, 
+        output_dir_type
+    )
+    if not output_sub_dir:
+        logger.error(f"无法获取输出目录，模式 {output_dir_type} 无效。")
+        return None
+        
     base_name = os.path.splitext(os.path.basename(png_path))[0]
     new_file_name = f"{base_name}.{output_format}"
+    output_path = os.path.join(output_sub_dir, new_file_name)
     
-    if output_dir_type == 1:
-        # 模式 1: 目标文件夹同级，创建兄弟文件夹，并复刻目录结构
-        # -----------------------------------------------------------
-        # 获取根文件夹的父目录作为新的基准目录
-        parent_folder = os.path.dirname(root_folder)
-        # 兄弟文件夹的绝对路径
-        sibling_dir_path = os.path.join(parent_folder, output_dir_base)
-        
-        # 计算当前文件相对于原始根文件夹的相对路径 (例如: 子文件夹A/子文件夹B/文件名.png)
-        # 确保路径是绝对路径
-        root_folder_abs = os.path.abspath(root_folder)
-        png_path_abs = os.path.abspath(png_path)
-        
-        # 获取相对目录 (例如: 子文件夹A/子文件夹B)
-        relative_dir = os.path.relpath(os.path.dirname(png_path_abs), root_folder_abs)
-        
-        # 构建新的输出子目录
-        output_sub_dir = os.path.join(sibling_dir_path, relative_dir)
-        
-        # 构建最终输出路径
-        output_path = os.path.join(output_sub_dir, new_file_name)
-        # -----------------------------------------------------------
-        
-    elif output_dir_type == 2:
-        # 模式 2 (原有模式): 在当前文件所在的子文件夹内创建子目录
-        # -----------------------------------------------------------
-        folder = os.path.dirname(png_path)
-        output_sub_dir = os.path.join(folder, output_dir_base) 
-        # 构建最终输出路径
-        output_path = os.path.join(output_sub_dir, new_file_name)
-        # -----------------------------------------------------------
-        
-    else:
-        logger.error(f"不支持的输出格式: {output_format}")
-        return None
-
-    # 创建目标目录 (无论模式1还是模式2，都需要创建)
+    # 创建目标目录
     os.makedirs(output_sub_dir, exist_ok=True)
     logger.debug(f"目标输出路径: {output_path}")
     
@@ -446,7 +464,6 @@ def convert_and_write_metadata(
                 
                 # 3. 准备写入元数据到 EXIF
                 try:
-                    
                     # **关键步骤：EXIF 写入 (调用优化方案)**
                     exif_bytes = generate_exif_bytes(raw_metadata)
 
@@ -456,22 +473,19 @@ def convert_and_write_metadata(
                     # -------------------------------------------------------------------
 
                 except Exception as e:
-                    # 捕获 EXIF 准备过程中的错误
+                    # 捕获 EXIF 准备过程中的错误（例如 piexif.dump 失败）
                     logger.error(f"为 '{output_path}' 准备 EXIF 元数据失败: {e}", exc_info=True)
                     logger.warning("将尝试不带 EXIF 写入图像文件。")
             
             # 4. 保存图像
             if output_format == 'jpg':
-                # **关键步骤：JPG 模式转换**
-                # JPG 不支持 Alpha 通道 (RGBA)，必须转换为 RGB
+                # JPG 模式转换：RGBA -> RGB
                 if img.mode == 'RGBA':
-                    # **改动点 2：将转换信息降级到 DEBUG 级别**
                     logger.debug("PNG 是 RGBA 模式，转换为 RGB 并填充白色背景。") 
                     background = Image.new('RGB', img.size, (255, 255, 255))
                     background.paste(img, mask=img.split()[3]) # 粘贴并使用 Alpha 通道作为蒙版
                     img = background
                 elif img.mode != 'RGB':
-                    # **改动点 3：将转换信息降级到 DEBUG 级别**
                     logger.debug(f"图像模式为 {img.mode}，转换为 RGB。")
                     img = img.convert('RGB')
                      
@@ -479,19 +493,19 @@ def convert_and_write_metadata(
                 img.save(output_path, 'jpeg', quality=95, **save_kwargs)
                 
             elif output_format == 'webp':
-                # WebP 保存，不需要强制转换为 RGB，但会尝试写入 EXIF
+                # WebP 保存
                 logger.debug("开始保存 WEBP 文件。")
                 img.save(output_path, 'webp', quality=95, **save_kwargs)
             else:
                 logger.error(f"不支持的输出格式: {output_format}")
                 return None
             
-            # **改动点 4：将文件成功写入信息降级到 DEBUG 级别**
             logger.debug(f"文件成功写入: {output_path}")
             return output_path
             
     except Exception as e:
         # 捕获文件读取或最终保存过程中的错误
+        # **改动：捕获最终保存失败的错误**
         logger.error(f"转换或保存文件 '{png_path}' 到 '{output_path}' 失败: {e}", exc_info=True)
         return None
 
@@ -518,6 +532,8 @@ def process_conversion_task(
     
     # 3. 结果收集逻辑
     if new_file_path: # 检查文件是否成功生成
+        # 成功逻辑
+        
         # 扫描新文件的元数据进行对比
         new_file_scan_result = process_single_image(new_file_path) # 再次扫描新生成的文件进行元数据提取和结构化
         
@@ -542,20 +558,44 @@ def process_conversion_task(
             f"生成的{output_format.upper()}文件的绝对路径": new_file_path,
             f"生成的{output_format.upper()}文件的pnginfo信息": new_file_info_string,
             "原文件和生成文件的pnginfo信息是否一致": is_consistent,
-            "success": True # 标记任务成功
+            "success": True, # 标记任务成功
+            "needs_everything_warning": False # 成功不触发警告
         }
     else:
-        # 记录失败结果
-        # 由于 convert_and_write_metadata 失败时会返回 None，此处进行失败记录
-        # 即使转换失败，也尝试清理原始元数据用于报告
+        # 失败逻辑：转换或保存失败 (包括元数据过长导致的保存失败)
         raw_png_info_no_newlines = raw_metadata.replace('\n', ' ').replace('\r', ' ').strip()
+        
+        # 失败处理：复制原始文件到目标目录
+        output_sub_dir = _get_output_sub_dir(
+            png_path, 
+            output_dir_base, 
+            root_folder, 
+            output_dir_type
+        )
+        copied_path = "原始文件复制失败"
+        if output_sub_dir:
+            try:
+                os.makedirs(output_sub_dir, exist_ok=True)
+                # 复制原始 PNG 文件
+                copied_filename = os.path.basename(png_path)
+                copied_path_full = os.path.join(output_sub_dir, copied_filename)
+                
+                # 使用 copy2 复制文件，并保留元数据（如创建/修改时间）
+                shutil.copy2(png_path, copied_path_full)
+                copied_path = copied_path_full # 记录成功复制的路径
+                logger.warning(f"由于转换失败，原始 PNG 文件已复制到: {copied_path}")
+            except Exception as e:
+                logger.error(f"复制失败文件 '{png_path}' 到 '{output_sub_dir}' 失败: {e}")
+                copied_path = "原始文件复制失败 (文件系统错误)"
+        
         return { # 返回失败任务的结果字典
             "原文件的绝对路径": png_path,
             "原文件的pnginfo信息": raw_png_info_no_newlines,
-            f"生成的{output_format.upper()}文件的绝对路径": "转换失败",
+            f"生成的{output_format.upper()}文件的绝对路径": f"转换失败，原始文件已复制到: {copied_path}",
             f"生成的{output_format.upper()}文件的pnginfo信息": "转换失败",
             "原文件和生成文件的pnginfo信息是否一致": "否 (转换失败)",
-            "success": False # 标记任务失败
+            "success": False, # 标记为失败
+            "needs_everything_warning": True # 失败需要触发一次警告
         }
 
 
@@ -586,7 +626,6 @@ def main_conversion_process(root_folder: str, choice: int, choice_dir: int):
     
     logger.info(f"在 '{root_folder}' 中发现 {total_files} 个 PNG 文件。将转换为 {output_format.upper()}。") # 打印任务信息
     
-    # **改动点 1: 提示当前使用的线程数量**
     # 修复 Pylance 警告：由于此处只读取 MAX_WORKERS，无需使用 global 关键字。
     logger.info(f"本次任务将使用 {MAX_WORKERS} 个线程进行并发处理 (基于当前计算机的 CPU 核心数)。")
 
@@ -663,17 +702,29 @@ def main_conversion_process(root_folder: str, choice: int, choice_dir: int):
                     f"生成的{output_format.upper()}文件的绝对路径": "转换失败 (任务异常)",
                     f"生成的{output_format.upper()}文件的pnginfo信息": "转换失败 (任务异常)",
                     "原文件和生成文件的pnginfo信息是否一致": "否 (任务异常)",
-                    "success": False # 标记为失败
+                    "success": False, # 标记为失败
+                    "needs_everything_warning": True # 任务异常需要触发警告
                 })
 
     # 3. 结果总结和 Excel 报告生成
     logger.info("\n--- 转换总结 ---")
     logger.info(f"总数量: {total_files}, 成功: {success_count}, 失败: {failure_count}")
 
+    # **新增: Everything 警告逻辑**
+    needs_everything_warning = any(
+        result.get("needs_everything_warning") 
+        for result in conversion_results
+    )
+    if needs_everything_warning:
+        logger.warning("-" * 50)
+        logger.warning("【🔍 检查警报 🔍】")
+        logger.warning("由于部分文件转换失败或信息写入不一致，建议使用 Everything 软件进行更多检查，以便快速定位未处理的原始 PNG 文件。")
+        logger.warning("-" * 50)
+
     if conversion_results:
         try:
             df = pd.DataFrame(conversion_results)
-            # **新增：元数据一致性校验统计**
+            # 新增：元数据一致性校验统计
             inconsistent_count = (df['原文件和生成文件的pnginfo信息是否一致'] == '否').sum()
             logger.info(f"元数据不一致 (校验失败) 数量: {inconsistent_count} (请查看 Excel 报告中 '否 (转换失败)' 和 '否 (任务异常)' 的记录)")
 
@@ -718,7 +769,7 @@ if __name__ == "__main__":
             
     # 3. 收集输入 - 输出文件目录方式
     print("\n请选择输出文件目录方式：")
-    print("  1. 目标文件夹同级，创建兄弟文件夹，并完整复刻目录结构 (例如: D:/Pictures/转换目标 -> D:/PNG转JPG/转换目标/...)")
+    print("  1. 目标文件夹同级，创建兄弟文件夹，**并将目标文件夹名称作为第一级子目录复刻完整结构** (例如: D:/Pictures/转换目标 -> D:/PNG转JPG/转换目标/...)")
     print("  2. 在每个子文件夹内创建对应的子目录 (例如: D:/Pictures/目标/子文件夹 -> D:/Pictures/目标/子文件夹/PNG转JPG/...)")
     while True:
         try:
@@ -731,7 +782,7 @@ if __name__ == "__main__":
         except ValueError:
             print("输入无效，请输入数字 1 或 2。")
 
-    # **改动点 2: Windows Defender 性能警报 (仅 Windows)**
+    # **Windows Defender 性能警报 (仅 Windows)**
     if sys.platform.startswith('win'):
         # 确保使用全局 MAX_WORKERS
         logger.warning("-" * 50)
