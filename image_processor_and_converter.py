@@ -388,7 +388,8 @@ def convert_and_write_metadata(
     
     !!! 安全提示: 本函数仅执行读取、转换和写入操作，不包含任何删除原文件的代码。
     """
-    logger.info(f"--- 正在处理文件: {os.path.basename(png_path)} ---")
+    # **改动点 1：将文件处理状态信息降级到 DEBUG 级别**
+    logger.debug(f"--- 正在处理文件: {os.path.basename(png_path)} ---")
     
     # 1. 构建新的输出路径和文件夹
     base_name = os.path.splitext(os.path.basename(png_path))[0]
@@ -427,7 +428,7 @@ def convert_and_write_metadata(
         # -----------------------------------------------------------
         
     else:
-        logger.error(f"无效的输出目录模式: {output_dir_type}")
+        logger.error(f"不支持的输出格式: {output_format}")
         return None
 
     # 创建目标目录 (无论模式1还是模式2，都需要创建)
@@ -464,13 +465,15 @@ def convert_and_write_metadata(
                 # **关键步骤：JPG 模式转换**
                 # JPG 不支持 Alpha 通道 (RGBA)，必须转换为 RGB
                 if img.mode == 'RGBA':
-                    logger.info("PNG 是 RGBA 模式，转换为 RGB 并填充白色背景。")
+                    # **改动点 2：将转换信息降级到 DEBUG 级别**
+                    logger.debug("PNG 是 RGBA 模式，转换为 RGB 并填充白色背景。") 
                     background = Image.new('RGB', img.size, (255, 255, 255))
                     background.paste(img, mask=img.split()[3]) # 粘贴并使用 Alpha 通道作为蒙版
                     img = background
                 elif img.mode != 'RGB':
-                     logger.info(f"图像模式为 {img.mode}，转换为 RGB。")
-                     img = img.convert('RGB')
+                    # **改动点 3：将转换信息降级到 DEBUG 级别**
+                    logger.debug(f"图像模式为 {img.mode}，转换为 RGB。")
+                    img = img.convert('RGB')
                      
                 logger.debug(f"开始保存 JPG 文件，最终模式: {img.mode}")
                 img.save(output_path, 'jpeg', quality=95, **save_kwargs)
@@ -483,7 +486,8 @@ def convert_and_write_metadata(
                 logger.error(f"不支持的输出格式: {output_format}")
                 return None
             
-            logger.info(f"文件成功写入: {output_path}")
+            # **改动点 4：将文件成功写入信息降级到 DEBUG 级别**
+            logger.debug(f"文件成功写入: {output_path}")
             return output_path
             
     except Exception as e:
@@ -689,7 +693,7 @@ if __name__ == "__main__":
     # ** 核心安全警告：本工具仅执行读取和写入操作，不包含任何删除原始文件的功能。**
     logger.info("--- PNG 图片批量转换和元数据校验工具启动 ---")
     # 提示当前控制台级别已设置为 INFO
-    logger.info("注意: 控制台日志级别已设置为 INFO，将只输出重要流程信息。详细 DEBUG 信息请通过修改代码查看。")
+    logger.info("注意: 控制台日志级别已设置为 INFO，将只输出重要流程信息。详细 DEBUG/文件处理信息请通过修改代码查看。")
     
     # 1. 收集输入 - 文件夹路径
     while True:
