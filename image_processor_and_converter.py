@@ -43,9 +43,9 @@ MAX_WORKERS = os.cpu_count() or 4
 # 日志文件记录 ERROR 级别的信息
 logger.add("image_processor_error.log", rotation="10 MB", level="ERROR", encoding="utf-8")
 # 默认的控制台输出级别设置为 INFO
-# 为了调试方便，将控制台输出级别临时设置为 DEBUG
+# **改动点 1: 降低控制台日志级别为 INFO，只输出关键信息，减少 DEBUG 信息的干扰。**
 logger.configure(handlers=[
-    {"sink": sys.stdout, "level": "DEBUG"} # DEBUG 级别可以捕获所有详细流程信息
+    {"sink": sys.stdout, "level": "INFO"} # 级别调整为 INFO，只输出重要信息和进度条配合
 ])
 
 
@@ -375,7 +375,6 @@ def generate_exif_bytes(raw_metadata: str) -> bytes | None:
         logger.error(f"[标准+兼容混合优化方案] 生成 EXIF 字节失败: {e}")
         return None
 
-#@@    440,443 +440,469   @@
 def convert_and_write_metadata(
     png_path: str, 
     raw_metadata: str, 
@@ -662,10 +661,16 @@ def main_conversion_process(root_folder: str, choice: int, choice_dir: int):
     # 3. 结果总结和 Excel 报告生成
     logger.info("\n--- 转换总结 ---")
     logger.info(f"总数量: {total_files}, 成功: {success_count}, 失败: {failure_count}")
-
+    # **改动点 2: 增加元数据一致性校验失败数量的统计和报告**
     if conversion_results:
         try:
             df = pd.DataFrame(conversion_results)
+            
+            # **新增：元数据一致性校验统计**
+            # 统计 '原文件和生成文件的pnginfo信息是否一致' 字段中值为 '否' 的数量
+            inconsistent_count = (df['原文件和生成文件的pnginfo信息是否一致'] == '否').sum()
+            logger.info(f"元数据不一致 (校验失败) 数量: {inconsistent_count} (请查看 Excel 报告中 '否 (转换失败)' 和 '否 (任务异常)' 的记录)")
+            
             # 根据用户需求，日志和 Excel 报告都要自动运行打开
             report_abs_path = os.path.abspath(report_file)
             df.to_excel(report_file, index=False, engine='openpyxl')
@@ -681,7 +686,7 @@ if __name__ == "__main__":
     
     # ** 核心安全警告：本工具仅执行读取和写入操作，不包含任何删除原始文件的功能。**
     logger.info("--- PNG 图片批量转换和元数据校验工具启动 ---")
-    logger.info("注意: 控制台日志级别已设置为 DEBUG，将输出详细流程信息。")
+    logger.info("注意: 控制台日志级别已设置为 INFO，将输出重要信息。详细 DEBUG 信息请通过代码修改。")
     
     # 1. 收集输入 - 文件夹路径
     while True:
@@ -723,3 +728,10 @@ if __name__ == "__main__":
     main_conversion_process(root_folder, choice, choice_dir)
     
     logger.info("--- 任务完成 ---")
+    
+    # **改动点 3: 程序结束暂停，等待用户回车关闭窗口，以防止 EXE 运行时窗口立即关闭**
+    try:
+        input("程序已执行完毕，请按回车键关闭窗口...")
+    except EOFError:
+        # 捕获在非交互式环境中运行时的 EOFError
+        pass
