@@ -1,0 +1,42 @@
+# Python 缓存文件
+__pycache__/
+
+# 缓存文件夹
+cache/
+
+# 日志文件夹
+logs/
+
+# 反推记录文件夹 (根据你提供的名称)
+反推记录/
+
+# 运行历史记录文件夹 (根据你提供的名称)
+运行历史记录/
+
+# 额外：如果你希望忽略所有的 .log 和 .xlsx 文件，可以添加：
+*.log
+*.xlsx
+*.txt
+
+parenthesis_escaper_log.txt
+
+
+images_danbooru
+
+
+results_danbooru
+
+
+cookies.json
+
+
+temp_playwright_images
+processed_images_by_postid
+png_danbooru_img
+wiki_danbooru_img
+Playwright_Image_Capture/
+
+
+dist/
+build/
+SD_Image_Converter.spec

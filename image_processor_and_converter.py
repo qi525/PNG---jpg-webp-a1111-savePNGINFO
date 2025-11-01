@@ -16,6 +16,7 @@ from loguru import logger
 
 # TODO 还是debug测试能不能生成webp，测试应该算是比较成功。【已完成】
 # TODO 添加生成文件的模式，目标文件夹同级生成一个"PNG转JPG"或者"PNG转WEBP"的兄弟文件夹，然后把整个目标文件夹的目录结构全部复制过去，只是把png文件转换成jpg或者webp文件，其他文件不动。
+# 【已完成，作为模式1】
 
 # --- 新增导入和常量 (用于正确的 EXIF 写入) ---
 import piexif 
@@ -374,27 +375,64 @@ def generate_exif_bytes(raw_metadata: str) -> bytes | None:
         logger.error(f"[标准+兼容混合优化方案] 生成 EXIF 字节失败: {e}")
         return None
 
+#@@    440,443 +440,469   @@
 def convert_and_write_metadata(
     png_path: str, 
     raw_metadata: str, 
     output_format: str, 
-    output_dir_base: str
+    output_dir_base: str, # 保持不变，还是 "png转JPG" 或 "png转WEBP"
+    root_folder: str, # 新增：原始根文件夹路径，用于模式1
+    output_dir_type: int # 新增：输出目录模式，1或2
 ) -> str | None:
     """
     写入过程核心函数：将 PNG 转换为目标格式，并将元数据写入新文件。
     
-    !!! 注意: 本次更新采用 [优化方案] generate_exif_bytes。
+    !!! 安全提示: 本函数仅执行读取、转换和写入操作，不包含任何删除原文件的代码。
     """
     logger.info(f"--- 正在处理文件: {os.path.basename(png_path)} ---")
     
     # 1. 构建新的输出路径和文件夹
-    folder = os.path.dirname(png_path)
-    output_sub_dir = os.path.join(folder, output_dir_base) 
-    os.makedirs(output_sub_dir, exist_ok=True)
-    
     base_name = os.path.splitext(os.path.basename(png_path))[0]
     new_file_name = f"{base_name}.{output_format}"
-    output_path = os.path.join(output_sub_dir, new_file_name)
+    
+    if output_dir_type == 1:
+        # 模式 1: 目标文件夹同级，创建兄弟文件夹，并复刻目录结构
+        # -----------------------------------------------------------
+        # 获取根文件夹的父目录作为新的基准目录
+        parent_folder = os.path.dirname(root_folder)
+        # 兄弟文件夹的绝对路径
+        sibling_dir_path = os.path.join(parent_folder, output_dir_base)
+        
+        # 计算当前文件相对于原始根文件夹的相对路径 (例如: 子文件夹A/子文件夹B/文件名.png)
+        # 确保路径是绝对路径
+        root_folder_abs = os.path.abspath(root_folder)
+        png_path_abs = os.path.abspath(png_path)
+        
+        # 获取相对目录 (例如: 子文件夹A/子文件夹B)
+        relative_dir = os.path.relpath(os.path.dirname(png_path_abs), root_folder_abs)
+        
+        # 构建新的输出子目录
+        output_sub_dir = os.path.join(sibling_dir_path, relative_dir)
+        
+        # 构建最终输出路径
+        output_path = os.path.join(output_sub_dir, new_file_name)
+        # -----------------------------------------------------------
+        
+    elif output_dir_type == 2:
+        # 模式 2 (原有模式): 在当前文件所在的子文件夹内创建子目录
+        # -----------------------------------------------------------
+        folder = os.path.dirname(png_path)
+        output_sub_dir = os.path.join(folder, output_dir_base) 
+        # 构建最终输出路径
+        output_path = os.path.join(output_sub_dir, new_file_name)
+        # -----------------------------------------------------------
+        
+    else:
+        logger.error(f"无效的输出目录模式: {output_dir_type}")
+        return None
+
+    # 创建目标目录 (无论模式1还是模式2，都需要创建)
+    os.makedirs(output_sub_dir, exist_ok=True)
     logger.debug(f"目标输出路径: {output_path}")
     
     try:
@@ -454,23 +492,25 @@ def convert_and_write_metadata(
         logger.error(f"转换或保存文件 '{png_path}' 到 '{output_path}' 失败: {e}", exc_info=True)
         return None
 
-def process_conversion_task(png_path: str, output_format: str, output_dir_base: str) -> Dict[str, Any]:
+def process_conversion_task(
+    png_path: str, 
+    raw_metadata: str, # 新增：预提取的原始元数据
+    output_format: str, 
+    output_dir_base: str, 
+    root_folder: str, # 新增：根文件夹
+    output_dir_type: int # 新增：输出目录模式
+) -> Dict[str, Any]:
     """
     [多线程工作单元] 处理单个 PNG 文件的提取、转换、写入和校验。
     """
-    # 1. 提取原始 PNG 元数据
-    raw_png_info = extract_metadata_from_png(png_path)
-    
-    # 清理元数据，移除首尾空格和换行符，确保元数据写入时是干净的
-    if raw_png_info: # 检查是否成功提取到元数据
-        raw_png_info = raw_png_info.strip() # 使用 strip() 清理字符串首尾的空白字符
-        
     # 2. 执行转换和写入元数据
     new_file_path = convert_and_write_metadata( # 调用核心转换函数
         png_path, 
-        raw_png_info, 
+        raw_metadata, 
         output_format, 
-        output_dir_base
+        output_dir_base,
+        root_folder, # 传递根文件夹
+        output_dir_type # 传递输出目录模式
     )
     
     # 3. 结果收集逻辑
@@ -484,7 +524,7 @@ def process_conversion_task(png_path: str, output_format: str, output_dir_base: 
         )
         
         # 简化原始信息进行对比
-        raw_png_info_no_newlines = raw_png_info.replace('\n', ' ').replace('\r', ' ').strip() # 清理原始元数据字符串
+        raw_png_info_no_newlines = raw_metadata.replace('\n', ' ').replace('\r', ' ').strip() # 清理原始元数据字符串
         
         # 对比结果
         is_consistent = "否" # 默认标记为不一致
@@ -504,9 +544,11 @@ def process_conversion_task(png_path: str, output_format: str, output_dir_base: 
     else:
         # 记录失败结果
         # 由于 convert_and_write_metadata 失败时会返回 None，此处进行失败记录
+        # 即使转换失败，也尝试清理原始元数据用于报告
+        raw_png_info_no_newlines = raw_metadata.replace('\n', ' ').replace('\r', ' ').strip()
         return { # 返回失败任务的结果字典
             "原文件的绝对路径": png_path,
-            "原文件的pnginfo信息": raw_png_info.replace('\n', ' ').replace('\r', ' ').strip(),
+            "原文件的pnginfo信息": raw_png_info_no_newlines,
             f"生成的{output_format.upper()}文件的绝对路径": "转换失败",
             f"生成的{output_format.upper()}文件的pnginfo信息": "转换失败",
             "原文件和生成文件的pnginfo信息是否一致": "否 (转换失败)",
@@ -514,14 +556,22 @@ def process_conversion_task(png_path: str, output_format: str, output_dir_base: 
         }
 
 
-def main_conversion_process(root_folder: str, choice: int):
+def main_conversion_process(root_folder: str, choice: int, choice_dir: int):
     """
     主处理流程，包括扫描、转换、生成报告。使用多线程并发处理文件。
+    
+    参数:
+    root_folder (str): 根文件夹路径。
+    choice (int): 目标格式选择 (1: JPG, 2: WebP)。
+    choice_dir (int): 输出目录模式选择 (1: 兄弟目录复刻, 2: 子文件夹旧模式)。
     """
     
     # 1. 预处理
+    # 确保根文件夹是绝对路径，且末尾不带分隔符，方便 relpath 计算
+    root_folder = os.path.abspath(root_folder) 
+    
     output_format = 'jpg' if choice == 1 else 'webp' # 根据用户选择确定输出格式
-    output_dir_base = f"png转{output_format.upper()}" # 定义输出子目录名称
+    output_dir_base = f"PNG转{output_format.upper()}" # 定义输出子目录名称 (使用大写，与用户描述一致)
     report_file = f"png_conversion_report_{output_format}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx" # 定义报告文件名称
     
     png_files = get_png_files(root_folder) # 扫描文件夹，获取所有 PNG 文件路径
@@ -532,6 +582,20 @@ def main_conversion_process(root_folder: str, choice: int):
         return # 退出函数
     
     logger.info(f"在 '{root_folder}' 中发现 {total_files} 个 PNG 文件。将转换为 {output_format.upper()}。") # 打印任务信息
+    
+    # --- 任务准备：预提取元数据 (避免在线程池内重复 I/O) ---
+    tasks_data = []
+    for png_path in png_files:
+        raw_metadata = extract_metadata_from_png(png_path)
+        # 清理元数据，移除首尾空格和换行符，确保元数据写入时是干净的
+        if raw_metadata:
+            raw_metadata = raw_metadata.strip()
+        tasks_data.append({
+            "png_path": png_path,
+            "raw_metadata": raw_metadata
+        })
+    logger.info(f"已预提取 {len(tasks_data)} 个文件的原始元数据。")
+    # --------------------------------------------------------
     
     conversion_results = [] # 初始化结果列表
     futures_to_path = {} # 初始化字典，用于存储 Future 对象和对应的文件路径
@@ -544,10 +608,21 @@ def main_conversion_process(root_folder: str, choice: int):
     # 使用 ThreadPoolExecutor 实现多线程并发，适合 I/O 密集型任务（文件读写）
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor: # 实例化线程池执行器，并设置最大工作线程数
         
-        # 遍历所有 PNG 文件，并将任务提交给线程池
-        for png_path in png_files: # 遍历待处理的 PNG 文件列表
+        # 遍历所有任务数据，并将任务提交给线程池
+        for task in tasks_data: # 遍历待处理的任务列表
+            png_path = task['png_path']
+            raw_metadata = task['raw_metadata']
+            
             # 提交任务到线程池，执行 process_conversion_task 函数
-            future = executor.submit(process_conversion_task, png_path, output_format, output_dir_base) # 提交 worker 函数到线程池，传递必要的参数
+            future = executor.submit(
+                process_conversion_task, 
+                png_path, 
+                raw_metadata, # 传递预提取的元数据
+                output_format, 
+                output_dir_base,
+                root_folder, # 传递根文件夹
+                choice_dir # 传递输出目录模式
+            ) # 提交 worker 函数到线程池，传递必要的参数
             # 存储 Future 对象和对应的原始文件路径
             futures_to_path[future] = png_path # 将返回的 Future 对象作为键，文件路径作为值存入字典
         
@@ -591,8 +666,10 @@ def main_conversion_process(root_folder: str, choice: int):
     if conversion_results:
         try:
             df = pd.DataFrame(conversion_results)
-            df.to_excel(report_file, index=False, engine='openpyxl')
+            # 根据用户需求，日志和 Excel 报告都要自动运行打开
             report_abs_path = os.path.abspath(report_file)
+            df.to_excel(report_file, index=False, engine='openpyxl')
+            
             logger.info(f"报告已成功生成: {report_abs_path}")
             # 4. 自动运行打开 Excel 报告
             os.startfile(report_abs_path) 
@@ -602,6 +679,7 @@ def main_conversion_process(root_folder: str, choice: int):
 
 if __name__ == "__main__":
     
+    # ** 核心安全警告：本工具仅执行读取和写入操作，不包含任何删除原始文件的功能。**
     logger.info("--- PNG 图片批量转换和元数据校验工具启动 ---")
     logger.info("注意: 控制台日志级别已设置为 DEBUG，将输出详细流程信息。")
     
@@ -625,8 +703,23 @@ if __name__ == "__main__":
                 print("无效的选择，请输入 1 或 2。")
         except ValueError:
             print("输入无效，请输入数字 1 或 2。")
+            
+    # 3. 收集输入 - 输出文件目录方式
+    print("\n请选择输出文件目录方式：")
+    print("  1. 目标文件夹同级，创建兄弟文件夹，并完整复刻目录结构 (例如: D:/Pictures/转换目标 -> D:/PNG转JPG/转换目标/...)")
+    print("  2. 在每个子文件夹内创建对应的子目录 (例如: D:/Pictures/目标/子文件夹 -> D:/Pictures/目标/子文件夹/PNG转JPG/...)")
+    while True:
+        try:
+            choice_dir_input = input("请选择输出目录模式 (1 或 2): ").strip()
+            choice_dir = int(choice_dir_input)
+            if choice_dir in [1, 2]:
+                break
+            else:
+                print("无效的选择，请输入 1 或 2。")
+        except ValueError:
+            print("输入无效，请输入数字 1 或 2。")
 
-    # 3. 执行主流程
-    main_conversion_process(root_folder, choice)
+    # 4. 执行主流程
+    main_conversion_process(root_folder, choice, choice_dir)
     
     logger.info("--- 任务完成 ---")
