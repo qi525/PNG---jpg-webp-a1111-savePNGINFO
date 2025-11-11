@@ -507,22 +507,21 @@ def convert_and_write_metadata(
             # --- 5. 写入原始时间戳 ---
             mtime_success = False
             ctime_success = False
+            # 增加误差范围为 2 秒，以应对文件系统、操作系统和 Python 解释器在时间戳精度上的差异。
+            TIME_CONSISTENCY_TOLERANCE = 2
             
             if original_mtime_ts > 0:
-                # 优先设置 mtime (跨平台最可靠)
-                mtime_success = file_timestamp_tools.modify_file_timestamps(output_path, original_mtime_ts)
+                # 优先设置 mtime (跨平台最可靠)，只设置 mtime，不设置 ctime
+                mtime_success = file_timestamp_tools.modify_file_timestamps(output_path, original_mtime_ts, set_mtime=True, set_ctime=False)
                 logger.debug(f"Mtime 写入结果: {'成功' if mtime_success else '失败'}")
                 
             if original_ctime_ts > 0:
-                # 尝试设置 ctime (Windows only)
-                # 注意：modify_file_timestamps 会在 Windows 上尝试同时设置 mtime/atime/ctime
-                # 尽管 mtime 已经设置过，但为了确保 ctime 被覆盖，可以再次调用。
-                # 实际上，在 modify_file_timestamps 内部已处理，这里只需判断是否设置成功
-                ctime_success = file_timestamp_tools.modify_file_timestamps(output_path, original_ctime_ts)
+                # 尝试设置 ctime (Windows only)，只设置 ctime，不设置 mtime
+                ctime_success = file_timestamp_tools.modify_file_timestamps(output_path, original_ctime_ts, set_mtime=False, set_ctime=True)
                 # 重新检查 ctime 是否匹配（仅在 Windows 上有意义）
                 current_ctime = os.stat(output_path).st_ctime
                 # 检查 ctime 是否接近原始 ctime
-                if abs(current_ctime - original_ctime_ts) < 1:
+                if abs(current_ctime - original_ctime_ts) < TIME_CONSISTENCY_TOLERANCE:
                     ctime_success = True
                 else:
                     ctime_success = False

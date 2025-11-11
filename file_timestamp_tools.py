@@ -61,45 +61,54 @@ def _unix_time_to_filetime(unix_time: float) -> wintypes.FILETIME:
     return file_time
 
 # --- 核心功能 2：修改文件时间戳（写入） ---
-def modify_file_timestamps(file_path: str, new_timestamp: float) -> bool:
+def modify_file_timestamps(file_path: str, new_timestamp: float, set_mtime: bool = True, set_ctime: bool = False) -> bool:
     """
     修改单个文件的修改时间(mtime)、访问时间(atime)和创建时间(ctime)。
 
     Args:
         file_path (str): 文件的完整路径。
         new_timestamp (float): 目标Unix时间戳。
+        set_mtime (bool): 是否修改修改时间(mtime)和访问时间(atime)。
+        set_ctime (bool): 是否修改创建时间(ctime) (仅Windows有效)。
 
     Returns:
         bool: 时间戳修改是否成功。
     """
+    
     if new_timestamp <= 0.0:
         # print("新的时间戳无效。")
         return False
         
     # 1. 修改访问时间(atime)和修改时间(mtime) (跨平台)
     try:
-        os.utime(file_path, (new_timestamp, new_timestamp))
+        if set_mtime:
+            # os.utime 同时设置 mtime 和 atime
+            os.utime(file_path, (new_timestamp, new_timestamp))
+            
     except Exception:
         # print(f"修改 mtime/atime 失败。")
         return False
     
     # 2. 尝试修改创建时间(ctime) (仅限Windows)
-    if platform.system() == "Windows":
+    if platform.system() == "Windows" and set_ctime:
         try:
             # 定义Windows API所需常量
             GENERIC_WRITE = 0x40000000
             OPEN_EXISTING = 3
+            # FILE_FLAG_BACKUP_SEMANTICS (0x02000000) 允许访问目录句柄并修改时间戳
+            FILE_FLAG_BACKUP_SEMANTICS = 0x02000000 
             
             handle = ctypes.windll.kernel32.CreateFileW(
-                file_path, GENERIC_WRITE, 0, None, OPEN_EXISTING, 0, None
+                file_path, GENERIC_WRITE, 0, None, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, None 
             )
 
             if handle != -1:
                 new_filetime = _unix_time_to_filetime(new_timestamp)
                 
-                # 调用 SetFileTime 函数，只设置创建时间
+                # 调用 SetFileTime 函数，参数 2, 3, 4 分别是 CreationTime, LastAccessTime, LastWriteTime
+                # 只有 CreationTime 传值，其他传 None
                 ctypes.windll.kernel32.SetFileTime(
-                    handle, ctypes.byref(new_filetime), None, None
+                    handle, ctypes.byref(new_filetime), None, None # 只设置 Creation Time
                 )
                 
                 ctypes.windll.kernel32.CloseHandle(handle)
@@ -108,19 +117,23 @@ def modify_file_timestamps(file_path: str, new_timestamp: float) -> bool:
             # print(f"Windows API 修改创建时间过程中发生错误。")
             pass # 不影响主结果，允许失败
 
-    # 3. 验证结果 (仅验证 mtime，因为它最可靠)
-    try:
-        stat_info = os.stat(file_path)
-        # 允许小于1秒的误差
-        if abs(stat_info.st_mtime - new_timestamp) < 1:
-             return True
-        else:
-             # print("时间戳修改验证失败：修改后的mtime与目标时间不匹配。")
-             return False
-             
-    except Exception:
-        # print("验证文件时间戳时发生错误。")
-        return False
+    # 3. 验证结果 (仅验证被设置的时间戳，mtime最可靠)
+    if set_mtime:
+        try:
+            stat_info = os.stat(file_path)
+            # 允许小于1秒的误差
+            if abs(stat_info.st_mtime - new_timestamp) < 1:
+                 return True
+            else:
+                 # print("时间戳修改验证失败：修改后的mtime与目标时间不匹配。")
+                 return False
+        except Exception:
+            # print("验证文件时间戳时发生错误。")
+            return False
+    
+    # 如果只设置 ctime (或两者都没设置)，则返回 True，因为 ctime 验证在外部 (image_processor_and_converter.py) 进行。
+    return True
+
 
 # --- 示例用法 (可选，但有助于验证独立性) ---
 if __name__ == "__main__":
