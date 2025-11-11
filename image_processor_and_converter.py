@@ -18,18 +18,16 @@ from loguru import logger
 # TODO 还是debug测试能不能生成webp，测试应该算是比较成功。【已完成】
 # TODO 添加生成文件的模式，目标文件夹同级生成一个"PNG转JPG"或者"PNG转WEBP"的兄弟文件夹，然后把整个目标文件夹的目录结构全部复制过去，只是把png文件转换成jpg或者webp文件，其他文件不动。
 # 【已完成，作为模式1】
-# TODO 新增功能：完美移植原文件的创建时间和修改时间到转换后的文件，并支持验证。【本次修改】
+# TODO 新增功能：完美移植原文件的创建时间和修改时间到转换后的文件，并支持验证。【已完成】
 
 # --- 新增导入和常量 (用于正确的 EXIF 写入) ---
 import piexif 
 import piexif.helper # 新增导入 piexif.helper 简化 UserComment 写入
-import file_timestamp_tools # @@ +1,1 @@ 新增：导入时间戳工具模块
+import file_timestamp_tools # 新增：导入时间戳工具模块
 # EXIF UserComment 标签 ID (0x9286)
 EXIF_USER_COMMENT_TAG = 37510 
 # EXIF ImageDescription 标签 ID (0x010E)
 EXIF_IMAGE_DESCRIPTION_TAG = 270 
-# 标准 EXIF UNICODE 头部 (8 字节)，已由 piexif.helper 处理，此常量不再需要
-# UNICODE_HEADER = b"UNICODE\x00" 
 # ---------------------------------------------
 
 
@@ -427,8 +425,8 @@ def convert_and_write_metadata(
     output_dir_base: str, # 保持不变，还是 "png转JPG" 或 "png转WEBP"
     root_folder: str, # 新增：原始根文件夹路径，用于模式1
     output_dir_type: int, # 新增：输出目录模式，1或2
-    original_mtime_ts: float, # @@ +404,1 @@ 新增：原始文件的修改时间戳
-    original_ctime_ts: float  # @@ +404,2 @@ 新增：原始文件的创建时间戳
+    original_mtime_ts: float, # 新增：原始文件的修改时间戳
+    original_ctime_ts: float  # 新增：原始文件的创建时间戳
 ) -> str | None:
     """
     写入过程核心函数：将 PNG 转换为目标格式，并将元数据写入新文件。
@@ -506,7 +504,6 @@ def convert_and_write_metadata(
             
             logger.debug(f"文件成功写入: {output_path}")
             
-            # @@ +483,18 @@ 5. 写入原始时间戳
             # --- 5. 写入原始时间戳 ---
             mtime_success = False
             ctime_success = False
@@ -548,8 +545,8 @@ def process_conversion_task(
     output_dir_base: str, 
     root_folder: str, # 新增：根文件夹
     output_dir_type: int, # 新增：输出目录模式
-    original_mtime_ts: float, # @@ +508,1 @@ 新增：原始 mtime
-    original_ctime_ts: float  # @@ +508,2 @@ 新增：原始 ctime
+    original_mtime_ts: float, # 新增：原始 mtime
+    original_ctime_ts: float  # 新增：原始 ctime
 ) -> Dict[str, Any]:
     """
     [多线程工作单元] 处理单个 PNG 文件的提取、转换、写入和校验。
@@ -562,8 +559,8 @@ def process_conversion_task(
         output_dir_base,
         root_folder, # 传递根文件夹
         output_dir_type, # 传递输出目录模式
-        original_mtime_ts, # @@ +520,1 @@ 传递原始 mtime
-        original_ctime_ts  # @@ +520,2 @@ 传递原始 ctime
+        original_mtime_ts, # 传递原始 mtime
+        original_ctime_ts  # 传递原始 ctime
     )
     
     # 3. 结果收集逻辑
@@ -587,7 +584,6 @@ def process_conversion_task(
         if raw_png_info_no_newlines and raw_png_info_no_newlines == new_file_info_string:
             is_consistent = "是" # 如果一致，标记为“是”
             
-        # @@ +549,27 @@ 4. 时间戳验证逻辑
         # --- 4. 时间戳验证逻辑 ---
         mtime_consistent = "否"
         ctime_consistent = "否"
@@ -628,8 +624,8 @@ def process_conversion_task(
             "原文件创建时间(ctime)": original_ctime_dt,
             "新文件创建时间(ctime)": final_ctime_dt,
             "Ctime移植是否成功(Win Only)": ctime_consistent,
-            "success": True, # 标记任务成功
-            "needs_everything_warning": False # 成功不触发警告
+            "任务执行状态": "成功", # 标记任务成功
+            "是否需要触发全局警告": False # 成功不触发警告
         }
     else:
         # 失败逻辑：转换或保存失败 (包括元数据过长导致的保存失败)
@@ -660,6 +656,7 @@ def process_conversion_task(
                 copied_path = "原始文件复制失败 (文件系统错误)"
         
         # 提取原始时间，以便在失败报告中记录
+        # ** FIX: 移除冗余且错误的 tasks_data 查找，直接使用函数参数 original_mtime_ts 和 original_ctime_ts **
         original_mtime_dt = datetime.fromtimestamp(original_mtime_ts).strftime("%Y-%m-%d %H:%M:%S")
         original_ctime_dt = datetime.fromtimestamp(original_ctime_ts).strftime("%Y-%m-%d %H:%M:%S")
         
@@ -675,8 +672,8 @@ def process_conversion_task(
             "原文件创建时间(ctime)": original_ctime_dt,
             "新文件创建时间(ctime)": "转换失败",
             "Ctime移植是否成功(Win Only)": "否 (转换失败)",
-            "success": False, # 标记为失败
-            "needs_everything_warning": True # 失败需要触发一次警告
+            "任务执行状态": "失败", # 标记为失败
+            "是否需要触发全局警告": True # 失败需要触发一次警告
         }
 
 
@@ -718,7 +715,6 @@ def main_conversion_process(root_folder: str, choice: int, choice_dir: int):
         if raw_metadata:
             raw_metadata = raw_metadata.strip()
             
-        # @@ +710,13 @@ 预提取时间戳
         # 预提取时间戳
         original_mtime_ts = 0.0
         original_ctime_ts = 0.0
@@ -786,7 +782,7 @@ def main_conversion_process(root_folder: str, choice: int, choice_dir: int):
                 conversion_results.append(result) # 将结果字典添加到总列表中
                 
                 # 更新计数器
-                if result.get('success', False): # 根据结果字典中的 'success' 键判断任务是否成功
+                if result.get('任务执行状态') in ["成功", "成功 (部分)"]: # 根据结果字典中的 '任务执行状态' 键判断任务是否成功
                     success_count += 1 # 成功任务计数加一
                 else:
                     failure_count += 1 # 失败任务计数加一
@@ -796,7 +792,7 @@ def main_conversion_process(root_folder: str, choice: int, choice_dir: int):
                 failure_count += 1 # 任务异常，失败任务计数加一
                 # 添加一个失败记录到结果列表
                 
-                # @@ +795,12 @@ 任务异常失败逻辑
+                # 任务异常失败逻辑
                 # 获取原始时间戳（如果任务异常，这里只能依赖预提取的数据）
                 task_data = next(task for task in tasks_data if task['png_path'] == png_path)
                 original_mtime_ts = task_data.get('original_mtime_ts', 0.0)
@@ -816,8 +812,8 @@ def main_conversion_process(root_folder: str, choice: int, choice_dir: int):
                     "原文件创建时间(ctime)": original_ctime_dt,
                     "新文件创建时间(ctime)": "任务异常",
                     "Ctime移植是否成功(Win Only)": "否 (任务异常)",
-                    "success": False, # 标记为失败
-                    "needs_everything_warning": True # 任务异常需要触发警告
+                    "任务执行状态": "失败 (异常)", # 标记为失败
+                    "是否需要触发全局警告": True # 任务异常需要触发警告
                 })
 
     # 3. 结果总结和 Excel 报告生成
@@ -826,7 +822,7 @@ def main_conversion_process(root_folder: str, choice: int, choice_dir: int):
 
     # **新增: Everything 警告逻辑**
     needs_everything_warning = any(
-        result.get("needs_everything_warning") 
+        result.get("是否需要触发全局警告") # 检查是否有任务要求触发警告
         for result in conversion_results
     )
     if needs_everything_warning:
@@ -839,10 +835,10 @@ def main_conversion_process(root_folder: str, choice: int, choice_dir: int):
         try:
             df = pd.DataFrame(conversion_results)
             # 新增：元数据一致性校验统计
-            inconsistent_count = (df['原文件和生成文件的pnginfo信息是否一致'] == '否').sum()
-            inconsistent_mtime_count = (df['Mtime移植是否成功'] == '否').sum() # @@ +830,1 @@ 新增：Mtime不一致校验
+            inconsistent_count = (df['原文件和生成文件的pnginfo信息是否一致'].str.contains('否')).sum()
+            inconsistent_mtime_count = (df['Mtime移植是否成功'] == '否').sum() # 新增：Mtime不一致校验
             logger.info(f"元数据不一致 (校验失败) 数量: {inconsistent_count} (请查看 Excel 报告中 '否 (转换失败)' 和 '否 (任务异常)' 的记录)")
-            logger.info(f"Mtime 移植失败数量: {inconsistent_mtime_count} (请检查报告中的 'Mtime移植是否成功' 列)") # @@ +832,1 @@ Mtime移植失败日志
+            logger.info(f"Mtime 移植失败数量: {inconsistent_mtime_count} (请检查报告中的 'Mtime移植是否成功' 列)") # Mtime移植失败日志
 
             # 根据用户需求，日志和 Excel 报告都要自动运行打开
             report_abs_path = os.path.abspath(report_file)
